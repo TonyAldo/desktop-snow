@@ -47,7 +47,7 @@ sealed class SnowApp : ApplicationContext
     readonly SnowSettings settings;
     readonly ClearShortcut shortcut;
     bool fullscreenPaused;
-    bool settingsOpen;
+    SnowSettingsDialog settingsDialog;
     bool clearQueued;
     int frames;
     bool paused;
@@ -127,18 +127,28 @@ sealed class SnowApp : ApplicationContext
 
     void OpenSettings()
     {
-        if (settingsOpen) return;
-        settingsOpen = true;
-        try
+        if (settingsDialog != null) return;
+        using (var dialog = new SnowSettingsDialog(settings, shortcut != null && shortcut.Registered))
         {
-            using (var dialog = new SnowSettingsDialog(settings, shortcut != null && shortcut.Registered))
+            settingsDialog = dialog;
+            try
             {
                 if (dialog.ShowDialog() != DialogResult.OK) return;
                 dialog.Apply();
                 SaveSettings();
             }
+            finally { settingsDialog = null; }
         }
-        finally { settingsOpen = false; }
+    }
+
+    Rectangle GetSettingsBounds()
+    {
+        if (settingsDialog == null || !settingsDialog.Visible) return Rectangle.Empty;
+        IntPtr handle = settingsDialog.Handle;
+        Native.Rect frame;
+        if (Native.DwmGetWindowAttribute(handle, 9, out frame, 16) != 0
+            && !Native.GetWindowRect(handle, out frame)) return Rectangle.Empty;
+        return Rectangle.FromLTRB(frame.Left, frame.Top, frame.Right, frame.Bottom);
     }
 
     void SaveSettings()
@@ -190,7 +200,7 @@ sealed class SnowApp : ApplicationContext
 
     void StartSweep()
     {
-        if (sweeping || settingsOpen) return;
+        if (sweeping || settingsDialog != null) return;
         if (fullscreenPaused)
         {
             clearQueued = true;
@@ -284,6 +294,7 @@ sealed class SnowApp : ApplicationContext
             {
                 window.RefreshFlakes();
                 window.TestAnimalFrame(frames);
+                if (frames == 0) window.VerifySettingsClip();
             }
         }
         if (smoke && frames == 3)
@@ -291,10 +302,11 @@ sealed class SnowApp : ApplicationContext
             foreach (var window in windows) window.SeedTestPile();
             StartSweep();
         }
+        Rectangle settingsBounds = GetSettingsBounds();
         bool finished = sweeping;
         foreach (var window in windows)
         {
-            window.Frame(dt, (float)now, settings, ledges, !paused);
+            window.Frame(dt, (float)now, settings, ledges, !paused, settingsBounds);
             finished &= window.SweepFinished;
         }
         if (finished)
@@ -944,7 +956,36 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
         return clump.Radius > .55f && clump.Y <= size.Height + 12 && clump.X > -120 && clump.X < size.Width + 120;
     }
 
-    public void Frame(float dt, float time, SnowSettings settings, List<Ledge> ledges, bool falling)
+    void BeginFrame(Rectangle settingsBounds)
+    {
+        canvas.ResetClip();
+        canvas.Clear(Color.Transparent);
+        Rectangle covered = Rectangle.Intersect(ScreenBounds, settingsBounds);
+        if (covered.IsEmpty) return;
+        covered.Offset(-ScreenBounds.Left, -ScreenBounds.Top);
+        canvas.ExcludeClip(covered);
+    }
+
+    public void VerifySettingsClip()
+    {
+        Rectangle dialog = new Rectangle(ScreenBounds.Left + 8, ScreenBounds.Top + 8, 32, 32);
+        BeginFrame(dialog);
+        var bank = new Snowbank(new Rectangle(0, 30, 64, 1)) { Occupied = true };
+        for (int i = 0; i < bank.Heights.Length; i++) bank.Heights[i] = 12;
+        DrawBank(bank);
+        canvas.Flush(FlushIntention.Sync);
+        if (bitmap.GetPixel(22, 24).A != 0 || bitmap.GetPixel(48, 24).A == 0)
+            throw new InvalidOperationException("A snowbank did not respect the settings dialog bounds.");
+
+        BeginFrame(Rectangle.Empty);
+        DrawBank(bank);
+        canvas.Flush(FlushIntention.Sync);
+        if (bitmap.GetPixel(22, 24).A == 0)
+            throw new InvalidOperationException("The snowbank did not reappear after settings closed.");
+    }
+
+    public void Frame(float dt, float time, SnowSettings settings, List<Ledge> ledges, bool falling,
+        Rectangle settingsBounds)
     {
         var weather = settings.Weather;
         int target = Math.Max(25, Math.Min(1300,
@@ -957,7 +998,7 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
             flakes.Add(flake);
         }
         if (!sweeping || !testSweep) SyncBanks(ledges, settings.Settle, time);
-        canvas.Clear(Color.Transparent);
+        BeginFrame(settingsBounds);
         float wind = weather.Wind * settings.Wind / 100f;
         float deposit = weather.Deposit * settings.Accumulation / 100f;
         float breeze = (7 + 13 * (float)Math.Sin(time * .34f)) * wind;
@@ -1093,3 +1134,4 @@ static class Native
     [DllImport("gdi32.dll")] public static extern IntPtr CreateDIBSection(IntPtr dc, ref BitmapInfo info,
         uint usage, out IntPtr bits, IntPtr section, uint offset);
 }
+
