@@ -50,7 +50,14 @@ partial class SnowWindow
         animalActive = true;
     }
 
-    void DrawAnimals(float dt, bool enabled)
+    int AnimalGround()
+    {
+        // The working-area edge sits just above a bottom taskbar.
+        int ground = Math.Min(size.Height - 1, Screen.FromRectangle(ScreenBounds).WorkingArea.Bottom - ScreenBounds.Top);
+        return ground < 35 ? size.Height - 1 : ground;
+    }
+
+    void DrawAnimals(float dt, bool enabled, List<Rectangle> windowBounds)
     {
         if (animalsEnabled != enabled)
         {
@@ -59,9 +66,7 @@ partial class SnowWindow
         }
         if (!enabled) return;
 
-        // The working-area edge sits just above a bottom taskbar.
-        int ground = Math.Min(size.Height - 1, Screen.FromRectangle(ScreenBounds).WorkingArea.Bottom - ScreenBounds.Top);
-        if (ground < 35) ground = size.Height - 1;
+        int ground = AnimalGround();
         if (ground != snowLine)
         {
             prints.Clear();
@@ -103,6 +108,11 @@ partial class SnowWindow
             }
         }
 
+        var clip = canvas.Save();
+        var trail = new Rectangle(0, ground - 60, size.Width, 61);
+        foreach (var bounds in windowBounds)
+            if (bounds.IntersectsWith(trail)) canvas.ExcludeClip(bounds);
+
         for (int i = prints.Count - 1; i >= 0; i--)
         {
             var print = prints[i];
@@ -129,19 +139,20 @@ partial class SnowWindow
             }
         }
 
-        if (!animalActive) return;
-        canvas.FillEllipse(shadows[8], animalX - 12, ground - 1.5f, 24, 1.5f);
-        var state = canvas.Save();
-        canvas.TranslateTransform(animalX, ground - lift);
-        canvas.ScaleTransform(animalDirection, 1);
-        float swing = (float)Math.Sin(gait * 17);
-        switch (visitor)
+        if (animalActive)
         {
-            case Animal.Rabbit: DrawRabbit(swing); break;
-            case Animal.Fox: DrawFox(swing); break;
-            case Animal.Penguin: DrawPenguin(swing * (1 - slide), slide); break;
+            canvas.FillEllipse(shadows[8], animalX - 12, ground - 1.5f, 24, 1.5f);
+            canvas.TranslateTransform(animalX, ground - lift);
+            canvas.ScaleTransform(animalDirection, 1);
+            float swing = (float)Math.Sin(gait * 17);
+            switch (visitor)
+            {
+                case Animal.Rabbit: DrawRabbit(swing); break;
+                case Animal.Fox: DrawFox(swing); break;
+                case Animal.Penguin: DrawPenguin(swing * (1 - slide), slide); break;
+            }
         }
-        canvas.Restore(state);
+        canvas.Restore(clip);
     }
 
     void DrawRabbit(float swing)
@@ -200,6 +211,34 @@ partial class SnowWindow
         canvas.Restore(posture);
     }
 
+    public void VerifyAnimalClip()
+    {
+        TestAnimalFrame((int)Animal.Penguin);
+        int x = (int)animalX;
+        int ground = AnimalGround();
+        var bounds = new List<Rectangle>();
+        BeginFrame(Rectangle.Empty);
+        DrawAnimals(0, true, bounds);
+        canvas.Flush(System.Drawing.Drawing2D.FlushIntention.Sync);
+        if (bitmap.GetPixel(x, ground - 12).A == 0)
+            throw new InvalidOperationException("The test animal was not visible.");
+
+        bounds.Add(new Rectangle(x - 40, ground - 50, 80, 55));
+        BeginFrame(Rectangle.Empty);
+        DrawAnimals(0, true, bounds);
+        canvas.Flush(System.Drawing.Drawing2D.FlushIntention.Sync);
+        if (bitmap.GetPixel(x, ground - 12).A != 0)
+            throw new InvalidOperationException("The animal drew over an overlapping window.");
+
+        bounds.Clear();
+        BeginFrame(Rectangle.Empty);
+        DrawAnimals(0, true, bounds);
+        canvas.Flush(System.Drawing.Drawing2D.FlushIntention.Sync);
+        if (bitmap.GetPixel(x, ground - 12).A == 0)
+            throw new InvalidOperationException("The animal did not reappear after the window moved.");
+        ResetAnimals();
+    }
+
     internal void TestAnimalFrame(int kind)
     {
         animalsEnabled = true;
@@ -220,3 +259,4 @@ partial class SnowWindow
         powder.Dispose();
     }
 }
+
