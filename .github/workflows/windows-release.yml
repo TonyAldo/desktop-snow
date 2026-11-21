@@ -23,12 +23,20 @@ jobs:
       - name: Build
         shell: cmd
         run: build.cmd
-      - name: Publish v1.0.1
+      - name: Publish v1.0.2
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $bundle = Get-FileHash dist/DesktopSnow.exe
           Set-Content dist/DesktopSnow.exe.sha256 ($bundle.Hash.ToLowerInvariant() + '  DesktopSnow.exe') -Encoding ascii
-          gh release create v1.0.1 dist/DesktopSnow.exe dist/DesktopSnow.exe.sha256 --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Desktop Snow 1.0.1" --notes "Fixed snowbanks drawing across the Desktop Snow Settings dialog. Snow continues around the dialog while it is open. Download DesktopSnow.exe for Windows."
+          $notes = @'
+          - Minimize a snowy window to send its drift tumbling onto lower windows or the taskbar.
+          - Snow tracks the title bar more closely during fast drags and breaks into clumps when shaken.
+          - Snow and animals stay behind overlapping windows. Taskbar drifts pick up soft window shadows.
+          - Tray tooltips and hover previews stay clear, including taller status labels.
+
+          Download **DesktopSnow.exe** below. Exit the previous version from the system tray before opening it.
+          '@
+          gh release create v1.0.2 dist/DesktopSnow.exe dist/DesktopSnow.exe.sha256 --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Desktop Snow 1.0.2" --notes $notes --latest
           exit $LASTEXITCODE
