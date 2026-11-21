@@ -23,12 +23,12 @@ jobs:
       - name: Build
         shell: cmd
         run: build.cmd
-      - name: Publish v1.0.0
+      - name: Publish v1.0.1
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $bundle = Get-FileHash dist/DesktopSnow.exe
           Set-Content dist/DesktopSnow.exe.sha256 ($bundle.Hash.ToLowerInvariant() + '  DesktopSnow.exe') -Encoding ascii
-          gh release create v1.0.0 dist/DesktopSnow.exe dist/DesktopSnow.exe.sha256 --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Desktop Snow 1.0.0" --notes "First public release. Download DesktopSnow.exe for Windows. The source archives include the build script and GPL license."
+          gh release create v1.0.1 dist/DesktopSnow.exe dist/DesktopSnow.exe.sha256 --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Desktop Snow 1.0.1" --notes "Fixed snowbanks drawing across the Desktop Snow Settings dialog. Snow continues around the dialog while it is open. Download DesktopSnow.exe for Windows."
           exit $LASTEXITCODE
