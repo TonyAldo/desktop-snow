@@ -2,6 +2,10 @@
 
 A click-through Windows overlay that brings animated snowfall to your desktop and apps. Flakes pile up in soft drifts, shake loose from windows, and land again on lower ledges.
 
+## Desktop Snow in action
+
+https://github.com/user-attachments/assets/8adaea70-498e-4642-b2d4-6f8d4b6bd71e
+
 ## Download and run
 
 Download **DesktopSnow.exe** from [GitHub Releases](https://github.com/TonyAldo/desktop-snow/releases). If an older copy is running, choose **Exit Desktop Snow** in its tray menu first. Open the executable, then look for the snowflake icon in the Windows notification area, including the hidden icons menu.
