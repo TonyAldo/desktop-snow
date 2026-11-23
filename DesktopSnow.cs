@@ -33,6 +33,9 @@ static class DesktopSnow
 sealed class SnowApp : ApplicationContext
 {
     readonly List<SnowWindow> windows = new List<SnowWindow>();
+    readonly List<DisplayArea> animalDisplays = new List<DisplayArea>();
+    readonly SnowAnimalScene animals = new SnowAnimalScene();
+    readonly Dictionary<IntPtr, WindowSnowDepth> windowSnow = new Dictionary<IntPtr, WindowSnowDepth>();
     readonly Timer timer = new Timer { Interval = 33 };
     readonly HashSet<IntPtr> pendingMinimizations = new HashSet<IntPtr>();
     readonly Native.WindowEvent windowMinimizing;
@@ -49,12 +52,10 @@ sealed class SnowApp : ApplicationContext
     uint ownProcess = (uint)Process.GetCurrentProcess().Id;
     readonly SnowSettings settings;
     readonly ClearShortcut shortcut;
-    bool fullscreenPaused;
     SnowSettingsDialog settingsDialog;
     bool clearQueued;
     int frames;
     bool paused;
-    bool sweeping;
     IntPtr movingWindow, attachmentWindow, frameInsetOwner;
     Padding frameInsets;
     uint frameInsetDpi;
@@ -109,6 +110,7 @@ sealed class SnowApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit Desktop Snow", null, (s, e) => ExitThread());
         SyncScreens();
+        UpdateVisibility();
         tray.Visible = !smoke;
         timer.Tick += (s, e) => Tick();
         if (!smoke)
@@ -149,9 +151,15 @@ sealed class SnowApp : ApplicationContext
             throw new InvalidOperationException("The lagging frame was not aligned with the live rectangle.");
         var screen = new Rectangle(-1920, 0, 1920, 1080);
         var frame = new Native.Rect { Left = -1920, Top = 0, Right = 0, Bottom = 1080 };
-        if (!CoversScreen(frame, screen)) throw new InvalidOperationException("A fullscreen app was missed.");
+        if (!CoversScreen(frame.ToRectangle(), screen)) throw new InvalidOperationException("A fullscreen app was missed.");
         frame.Bottom = 1032;
-        if (CoversScreen(frame, screen)) throw new InvalidOperationException("A window above the taskbar was treated as fullscreen.");
+        if (CoversScreen(frame.ToRectangle(), screen)) throw new InvalidOperationException("A window above the taskbar was treated as fullscreen.");
+        var rightScreen = new Rectangle(0, -180, 2560, 1440);
+        if (!CoversScreen(rightScreen, rightScreen) || CoversScreen(rightScreen, screen))
+            throw new InvalidOperationException("Fullscreen detection paused an adjacent monitor.");
+        SnowAnimalScene.VerifyRoutes();
+        SnowWindow.VerifyAdjacentAnimalFrames();
+        SnowWindow.VerifyWindowDriftCrossesDisplays();
     }
 
     void OpenSettings()
@@ -193,10 +201,10 @@ sealed class SnowApp : ApplicationContext
         tray.ShowBalloonTip(4000, "Desktop Snow", "Your changes apply now, but Windows could not save them.", ToolTipIcon.Warning);
     }
 
-    static bool IsFullscreenWindow()
+    static Rectangle GetForegroundFrame()
     {
         IntPtr active = Native.GetForegroundWindow();
-        if (active == IntPtr.Zero || active == Native.GetShellWindow() || Native.IsIconic(active)) return false;
+        if (active == IntPtr.Zero || active == Native.GetShellWindow() || Native.IsIconic(active)) return Rectangle.Empty;
         var name = new System.Text.StringBuilder(64);
         Native.GetClassName(active, name, name.Capacity);
         switch (name.ToString())
@@ -205,19 +213,19 @@ sealed class SnowApp : ApplicationContext
             case "WorkerW":
             case "Shell_TrayWnd":
             case "Shell_SecondaryTrayWnd":
-                return false;
+                return Rectangle.Empty;
         }
 
         Native.Rect rect;
         if (Native.DwmGetWindowAttribute(active, 9, out rect, 16) != 0
-            && !Native.GetWindowRect(active, out rect)) return false;
-        return CoversScreen(rect, Screen.FromHandle(active).Bounds);
+            && !Native.GetWindowRect(active, out rect)) return Rectangle.Empty;
+        return rect.ToRectangle();
     }
 
-    static bool CoversScreen(Native.Rect rect, Rectangle screen)
+    static bool CoversScreen(Rectangle frame, Rectangle screen)
     {
-        return rect.Left <= screen.Left + 2 && rect.Top <= screen.Top + 2
-            && rect.Right >= screen.Right - 2 && rect.Bottom >= screen.Bottom - 2;
+        return !frame.IsEmpty && frame.Left <= screen.Left + 2 && frame.Top <= screen.Top + 2
+            && frame.Right >= screen.Right - 2 && frame.Bottom >= screen.Bottom - 2;
     }
 
     void Toggle()
@@ -227,50 +235,72 @@ sealed class SnowApp : ApplicationContext
         UpdateVisibility();
     }
 
+    bool AnyVisibleSweep()
+    {
+        return windows.Exists(window => !window.FullscreenPaused && !window.DisplayLost && window.IsSweeping);
+    }
+
     void StartSweep()
     {
-        if (sweeping || settingsDialog != null) return;
-        if (fullscreenPaused)
+        if (settingsDialog != null || AnyVisibleSweep()) return;
+        if (!windows.Exists(window => !window.FullscreenPaused && !window.DisplayLost))
         {
             clearQueued = true;
             return;
         }
-        sweeping = true;
-        clear.Enabled = false;
-        foreach (var window in windows) window.BeginSweep(smoke);
+        foreach (var window in windows)
+            if (!window.IsSweeping) window.BeginSweep(smoke);
         UpdateVisibility();
     }
 
-    void UpdateVisibility()
+    bool UpdateVisibility()
     {
-        bool visible = !fullscreenPaused && (!paused || sweeping);
-        timer.Interval = visible ? 33 : 250;
+        bool visible = false;
         foreach (var window in windows)
         {
-            if (visible) window.Show();
-            else window.Hide();
+            bool show = !window.DisplayLost && !window.FullscreenPaused && (!paused || window.IsSweeping);
+            window.SetVisible(show);
+            visible |= show;
         }
-        last = clock.Elapsed.TotalSeconds;
+        clear.Enabled = !AnyVisibleSweep();
+        if (!visible && timer.Interval != 250) timer.Interval = 250;
+        return visible;
     }
 
     void SyncScreens()
     {
-        var screens = Screen.AllScreens;
-        if (screens.Length == windows.Count)
+        var displays = Native.ReadDisplays();
+        if (displays.Count == 0)
         {
-            bool same = true;
-            for (int i = 0; i < screens.Length; i++)
-                same &= windows[i].ScreenBounds == screens[i].Bounds;
-            if (same) return;
+            // A display driver can report no monitors briefly during a topology change.
+            if (windows.Count != 0) return;
+            foreach (var screen in Screen.AllScreens)
+                displays.Add(new DisplayArea(screen.Bounds, screen.WorkingArea));
         }
-        foreach (var window in windows) window.Dispose();
-        windows.Clear();
-        foreach (var screen in screens)
+
+        for (int i = windows.Count - 1; i >= 0; i--)
         {
-            var window = new SnowWindow(screen.Bounds, smoke, ReadDragInsets);
-            windows.Add(window);
-            if (sweeping) window.BeginSweep(smoke);
-            if (!fullscreenPaused && (!paused || sweeping)) window.Show();
+            var window = windows[i];
+            Rectangle bounds = window.ScreenBounds;
+            if (!window.DisplayLost && displays.Exists(display => display.Bounds == bounds)) continue;
+            window.Dispose();
+            windows.RemoveAt(i);
+        }
+
+        foreach (var display in displays)
+        {
+            var window = windows.Find(candidate => candidate.ScreenBounds == display.Bounds);
+            if (window != null)
+            {
+                window.Display = display;
+                continue;
+            }
+            try { windows.Add(new SnowWindow(display, smoke, ReadDragInsets, windowSnow)); }
+            catch (System.ComponentModel.Win32Exception error)
+            {
+                if (smoke) throw;
+                Debug.WriteLine(error); // Retry this monitor without interrupting the remaining displays.
+            }
         }
     }
 
@@ -284,19 +314,16 @@ sealed class SnowApp : ApplicationContext
             layoutCheck = now;
             SyncScreens();
         }
-        bool fullscreen = !smoke && settings.AutoPause && IsFullscreenWindow();
-        if (fullscreen != fullscreenPaused)
-        {
-            fullscreenPaused = fullscreen;
-            UpdateVisibility();
-        }
-        if (fullscreenPaused) return;
-        if (clearQueued)
+        var fullscreen = !smoke && settings.AutoPause ? GetForegroundFrame() : Rectangle.Empty;
+        foreach (var window in windows) window.FullscreenPaused = CoversScreen(fullscreen, window.ScreenBounds);
+        bool visible = UpdateVisibility();
+        if (clearQueued && windows.Exists(window => !window.FullscreenPaused && !window.DisplayLost))
         {
             clearQueued = false;
             StartSweep();
+            visible = UpdateVisibility();
         }
-        if (paused && !sweeping) return;
+        if (!visible) return;
         movingWindow = settings.Settle && !smoke ? Native.GetMovingWindow() : IntPtr.Zero;
         attachmentWindow = settings.Settle
             ? (movingWindow != IntPtr.Zero ? movingWindow : Native.GetForegroundWindow())
@@ -357,7 +384,6 @@ sealed class SnowApp : ApplicationContext
                     window.VerifyTrayTooltipClip();
                     window.VerifyAnimalClip();
                 }
-                window.TestAnimalFrame(frames);
             }
         }
         if (smoke && frames == 3)
@@ -366,27 +392,54 @@ sealed class SnowApp : ApplicationContext
             StartSweep();
         }
         ReleaseMinimizingWindows(ledges, (float)now);
+        if (windowSnow.Count != 0)
+        {
+            // Keep drifts for live windows even if their top edge is temporarily off a display.
+            var live = new HashSet<IntPtr>();
+            if (settings.Settle)
+                foreach (var ledge in ledges)
+                    if (ledge.Moves && ledge.Collects) live.Add(ledge.Handle);
+            var stale = new List<IntPtr>();
+            foreach (var handle in windowSnow.Keys)
+                if (!live.Contains(handle)) stale.Add(handle);
+            foreach (var handle in stale) windowSnow.Remove(handle);
+        }
         Rectangle settingsBounds = GetSettingsBounds();
-        bool finished = sweeping;
+        animalDisplays.Clear();
+        if (settings.Animals && !paused)
+            foreach (var window in windows)
+                if (window.SceneVisible && !window.IsSweeping) animalDisplays.Add(window.Display);
+        animals.Advance(dt, animalDisplays);
+        if (smoke && frames < SnowWeather.Presets.Length && animalDisplays.Count != 0)
+        {
+            var display = animalDisplays[0];
+            animals.TestAt(frames, display.Bounds.Left + display.Bounds.Width / 2, display.Ground);
+        }
+
         foreach (var window in windows)
         {
-            window.Frame(dt, (float)now, settings, ledges, !paused, settingsBounds, movingWindow);
-            finished &= window.SweepFinished;
-        }
-        if (finished)
-        {
-            foreach (var window in windows)
+            if (!window.SceneVisible) continue;
+            try
+            {
+                window.Frame(dt, (float)now, settings, ledges, !paused, settingsBounds, movingWindow, animals);
+            }
+            catch (System.ComponentModel.Win32Exception error)
+            {
+                if (smoke) throw;
+                Debug.WriteLine(error);
+                window.DisplayLost = true;
+                continue;
+            }
+            if (window.IsSweeping && window.SweepFinished)
             {
                 if (smoke && window.HasDeepSnow) throw new InvalidOperationException("The sweep left snow behind.");
                 window.EndSweep();
             }
-            sweeping = false;
-            clear.Enabled = true;
-            UpdateVisibility();
         }
+        UpdateVisibility();
         if (smoke && ++frames >= 24)
         {
-            if (sweeping) throw new InvalidOperationException("The sweep did not finish.");
+            if (AnyVisibleSweep()) throw new InvalidOperationException("The sweep did not finish.");
             ExitThread();
         }
     }
@@ -466,12 +519,13 @@ sealed class SnowApp : ApplicationContext
         Rectangle? popupClip = null;
         if (hoverClass != null)
         {
-            var screen = Screen.FromRectangle(bounds);
-            if (screen.WorkingArea.Bottom < screen.Bounds.Bottom)
+            var monitor = windows.Find(window => window.ScreenBounds.Contains(
+                bounds.Left + bounds.Width / 2, bounds.Top + bounds.Height / 2));
+            if (monitor != null && monitor.Display.WorkArea.Bottom < monitor.ScreenBounds.Bottom)
             {
                 uint dpi = Native.WindowDpi(handle);
-                var tray = Rectangle.FromLTRB(screen.Bounds.Left, screen.WorkingArea.Bottom,
-                    screen.Bounds.Right, screen.Bounds.Bottom);
+                var tray = Rectangle.FromLTRB(monitor.ScreenBounds.Left, monitor.Display.WorkArea.Bottom,
+                    monitor.ScreenBounds.Right, monitor.ScreenBounds.Bottom);
                 bool nativeTooltip = hoverClass == "tooltips_class32";
                 Point? hoverPoint = handle != Native.GetForegroundWindow() ? Cursor.Position : (Point?)null;
                 popupClip = TrayTooltipBody(bounds, tray, dpi, nativeTooltip, hoverPoint);
@@ -607,6 +661,19 @@ sealed class SnowApp : ApplicationContext
     }
 }
 
+internal sealed class DisplayArea
+{
+    public readonly Rectangle Bounds, WorkArea;
+    public DisplayArea(Rectangle bounds, Rectangle workArea)
+    {
+        Bounds = bounds;
+        WorkArea = Rectangle.Intersect(bounds, workArea);
+        if (WorkArea.Width <= 0 || WorkArea.Height <= 0) WorkArea = bounds;
+    }
+
+    public int Ground { get { return Math.Min(Bounds.Bottom - 1, WorkArea.Bottom); } }
+}
+
 sealed class Ledge
 {
     public readonly IntPtr Handle;
@@ -627,6 +694,14 @@ sealed class Ledge
     }
 }
 
+sealed class WindowSnowDepth
+{
+    public float[] Heights;
+    public bool Occupied;
+
+    public WindowSnowDepth(int count) { Heights = new float[count]; }
+}
+
 sealed partial class SnowWindow : NativeWindow, IDisposable
 {
     sealed class Flake
@@ -641,7 +716,10 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
     sealed class Snowbank
     {
         public Rectangle Edge;
-        public float[] Heights;
+        public readonly WindowSnowDepth Depth;
+        public float[] Heights { get { return Depth.Heights; } }
+        public bool Occupied { get { return Depth.Occupied; } set { Depth.Occupied = value; } }
+        public readonly bool Shared;
         public IntPtr Handle;
         public bool Seen;
         public int Direction;
@@ -650,14 +728,14 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
         public float LastMove, LastShake = -10;
         public bool Taskbar, WindowLedge;
         public readonly List<Rectangle> Covered = new List<Rectangle>();
-        public bool Occupied;
         public readonly List<SnowBreak> Breaks = new List<SnowBreak>();
 
-        public Snowbank(Rectangle edge)
+        public Snowbank(Rectangle edge, WindowSnowDepth sharedDepth = null)
         {
             Edge = edge;
             MotionOrigin = edge.Location;
-            Heights = new float[(edge.Width + BinWidth - 1) / BinWidth];
+            Shared = sharedDepth != null;
+            Depth = sharedDepth ?? new WindowSnowDepth((edge.Width + BinWidth - 1) / BinWidth);
         }
     }
 
@@ -689,7 +767,12 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
     public bool SweepFinished { get; private set; }
     readonly Snowbank emptyRunway;
 
-    public Rectangle ScreenBounds { get; private set; }
+    public DisplayArea Display { get; set; }
+    public Rectangle ScreenBounds { get { return Display.Bounds; } }
+    public bool FullscreenPaused { get; set; }
+    public bool DisplayLost { get; set; }
+    public bool SceneVisible { get; private set; }
+    public bool IsSweeping { get { return sweeping; } }
     readonly Random random = new Random(Guid.NewGuid().GetHashCode());
     readonly List<Flake> flakes = new List<Flake>();
     readonly Bitmap[] sprites = new Bitmap[6];
@@ -709,14 +792,18 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
     TextureBrush shadowBrush;
     Graphics canvas;
     readonly Func<IntPtr, Padding?> readDragInsets;
+    readonly Dictionary<IntPtr, WindowSnowDepth> windowSnow;
     DragLayer dragStrip;
     IntPtr bitmapBits;
     IntPtr failedDragTarget;
 
-    public SnowWindow(Rectangle bounds, bool smoke, Func<IntPtr, Padding?> readDragInsets)
+    public SnowWindow(DisplayArea display, bool smoke, Func<IntPtr, Padding?> readDragInsets,
+        Dictionary<IntPtr, WindowSnowDepth> windowSnow = null)
     {
         this.readDragInsets = readDragInsets;
-        ScreenBounds = bounds;
+        this.windowSnow = windowSnow;
+        Display = display;
+        Rectangle bounds = display.Bounds;
         position = smoke ? new Native.Point(-32000, -32000) : new Native.Point(bounds.X, bounds.Y);
         size = new Native.Size(bounds.Width, bounds.Height);
         emptyRunway = new Snowbank(new Rectangle(0, size.Height - 1, size.Width, 1));
@@ -753,14 +840,22 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
         catch { Dispose(); throw; }
     }
 
-    public void Show()
+    public void SetVisible(bool visible)
+    {
+        if (visible == SceneVisible) return;
+        SceneVisible = visible;
+        if (visible) Show();
+        else Hide();
+    }
+
+    void Show()
     {
         Native.SetWindowPos(Handle, Native.TopmostWindow, 0, 0, 0, 0, Native.KeepGeometryAndFocus);
         popupAdjustedOrder = false;
         Native.ShowWindow(Handle, 4);
     }
 
-    public void Hide()
+    void Hide()
     {
         HideDragStrip();
         Native.ShowWindow(Handle, 0);
@@ -936,7 +1031,7 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
                     bottomTaskbar = true;
                 if ((ledge.Collects || !ledge.Moves) && bounds.Top >= 6 && bounds.Top < size.Height)
                     TrackBank(ledge.Handle, new Rectangle(bounds.Left, bounds.Top, bounds.Width, 1),
-                        ledge.Moves ? covers : windowBounds, ledge.Moves, time);
+                        ledge.Moves ? covers : windowBounds, ledge.Moves, time, ledge.Moves);
                 covers.Add(bounds);
             }
             if (!bottomTaskbar)
@@ -948,12 +1043,18 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
         banks.RemoveAll(bank => !bank.Seen);
     }
 
-    void TrackBank(IntPtr handle, Rectangle edge, List<Rectangle> covers, bool moves, float time)
+    void TrackBank(IntPtr handle, Rectangle edge, List<Rectangle> covers, bool moves, float time, bool shareDepth = false)
     {
         var bank = banks.Find(item => item.Handle == handle);
         if (bank == null)
         {
-            bank = new Snowbank(edge) { Handle = handle };
+            WindowSnowDepth depth = null;
+            if (shareDepth && windowSnow != null && !windowSnow.TryGetValue(handle, out depth))
+            {
+                depth = new WindowSnowDepth((edge.Width + BinWidth - 1) / BinWidth);
+                windowSnow.Add(handle, depth);
+            }
+            bank = new Snowbank(edge, depth) { Handle = handle };
             banks.Add(bank);
         }
         int dx = edge.X - bank.MotionOrigin.X;
@@ -974,7 +1075,7 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
             bank.MotionOrigin = edge.Location;
         }
         int count = (edge.Width + BinWidth - 1) / BinWidth;
-        if (count != bank.Heights.Length) Array.Resize(ref bank.Heights, count);
+        if (count != bank.Heights.Length) Array.Resize(ref bank.Depth.Heights, count);
         bank.Edge = edge;
         bank.Taskbar = !moves && handle != IntPtr.Zero;
         bank.WindowLedge = moves;
@@ -1004,17 +1105,26 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
         ReleaseSnowBreaks(bank, time, true);
     }
 
+    int BinAtBoundary(Snowbank bank, int x)
+    {
+        if (x <= bank.Edge.Left) return 0;
+        if (x >= bank.Edge.Right) return bank.Heights.Length;
+        return Math.Min(bank.Heights.Length, Math.Max(0, (int)Math.Ceiling((x - bank.Edge.Left) / (double)BinWidth - .5)));
+    }
+
     void QueueSnowBreaks(Snowbank bank, int dx, int dy, float time, bool entireBank = false)
     {
         if (!bank.Occupied || bank.Breaks.Count != 0) return;
-        for (int i = 0; i < bank.Heights.Length;)
+        int start = bank.Shared ? BinAtBoundary(bank, 0) : 0;
+        int end = bank.Shared ? BinAtBoundary(bank, size.Width) : bank.Heights.Length;
+        for (int i = start; i < end;)
         {
             if (bank.Heights[i] < (entireBank ? .2f : 1f))
             {
                 i++;
                 continue;
             }
-            int count = Math.Min(random.Next(4, 13), bank.Heights.Length - i);
+            int count = Math.Min(random.Next(4, 13), end - i);
             bank.Breaks.Add(new SnowBreak
             {
                 First = i, Count = count,
@@ -1034,9 +1144,11 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
             var piece = bank.Breaks[i];
             if (!entireBank && piece.Due > time) continue;
             bank.Breaks.RemoveAt(i);
-            int end = Math.Min(bank.Heights.Length, piece.First + piece.Count);
+            int start = bank.Shared ? Math.Max(piece.First, BinAtBoundary(bank, 0)) : piece.First;
+            int limit = bank.Shared ? BinAtBoundary(bank, size.Width) : bank.Heights.Length;
+            int end = Math.Min(limit, piece.First + piece.Count);
             float mass = 0, moment = 0, peak = 0;
-            for (int bin = piece.First; bin < end; bin++)
+            for (int bin = start; bin < end; bin++)
             {
                 float height = bank.Heights[bin];
                 float removed = entireBank ? height : height * (.37f + (float)random.NextDouble() * .32f);
@@ -1216,7 +1328,10 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
             int width = Math.Min(size.Width, track.Edge.Right) - Math.Max(0, track.Edge.Left);
             if (width > 0 && (track == emptyRunway || banks.Contains(track)))
             {
-                int ahead = Math.Min(track.Heights.Length - 1, clearedBins + 2);
+                int start = track.Shared ? BinAtBoundary(track, 0) : 0;
+                int end = track.Shared ? BinAtBoundary(track, size.Width) : track.Heights.Length;
+                clearedBins = Math.Max(start, clearedBins);
+                int ahead = Math.Max(0, Math.Min(end - 1, clearedBins + 2));
                 float resistance = Math.Min(1, (track.Heights[ahead] + mound * .25f) / 23f);
                 float speed = testSweep ? (width + 65) * 5.5f : 210 - 115 * resistance;
                 travel += speed * dt;
@@ -1224,7 +1339,7 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
                 float blade = left - 6 + travel;
                 bool done = travel >= width + 65;
                 float removed = 0;
-                while (clearedBins < track.Heights.Length
+                while (clearedBins < end
                     && (done || track.Edge.Left + clearedBins * BinWidth <= blade))
                 {
                     float height = track.Heights[clearedBins];
@@ -1479,6 +1594,47 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
         }
     }
 
+    internal static void VerifyWindowDriftCrossesDisplays()
+    {
+        var leftBounds = new Rectangle(-240, 0, 240, 280);
+        var rightBounds = new Rectangle(0, 0, 260, 280);
+        var registry = new Dictionary<IntPtr, WindowSnowDepth>();
+        using (var left = new SnowWindow(new DisplayArea(leftBounds, leftBounds), true, handle => null, registry))
+        using (var right = new SnowWindow(new DisplayArea(rightBounds, rightBounds), true, handle => null, registry))
+        {
+            var handle = new IntPtr(12);
+            var ledges = new List<Ledge> { new Ledge(handle, new Rectangle(-190, 70, 125, 140), true, true) };
+            var covers = new List<Rectangle>();
+            left.SyncBanks(ledges, covers, true, 0);
+            var initial = left.banks.Find(bank => bank.Handle == handle);
+            initial.Heights[2] = 4;
+            initial.Heights[19] = 13;
+            initial.Occupied = true;
+            var profile = initial.Heights;
+            ledges[0] = new Ledge(handle, new Rectangle(-45, 70, 125, 140), true, true);
+            left.SyncBanks(ledges, covers, true, .1f);
+            right.SyncBanks(ledges, covers, true, .1f);
+            var crossing = right.banks.Find(bank => bank.Handle == handle);
+            if (crossing == null || !ReferenceEquals(initial.Depth, crossing.Depth) || crossing.Heights[19] != 13
+                || left.BinAtBoundary(initial, leftBounds.Width) != right.BinAtBoundary(crossing, 0))
+                throw new InvalidOperationException("The snow profile or bin ownership split at the display seam.");
+
+            ledges[0] = new Ledge(handle, new Rectangle(22, 70, 125, 140), true, true);
+            left.SyncBanks(ledges, covers, true, .2f);
+            right.SyncBanks(ledges, covers, true, .2f);
+            if (left.banks.Exists(bank => bank.Handle == handle) || !ReferenceEquals(crossing.Heights, profile)
+                || crossing.Heights[2] != 4 || crossing.Heights[19] != 13)
+                throw new InvalidOperationException("Moving the window fully onto a second display reset its drift.");
+
+            ledges[0] = new Ledge(handle, new Rectangle(-190, 70, 125, 140), true, true);
+            right.SyncBanks(ledges, covers, true, .6f);
+            left.SyncBanks(ledges, covers, true, .6f);
+            var returned = left.banks.Find(bank => bank.Handle == handle);
+            if (returned == null || !ReferenceEquals(returned.Heights, profile) || !returned.Occupied)
+                throw new InvalidOperationException("The returning window did not retain its snow.");
+        }
+    }
+
     public void VerifyWindowAttachment()
     {
         var window = new IntPtr(3);
@@ -1696,7 +1852,7 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
     }
 
     public void Frame(float dt, float time, SnowSettings settings, List<Ledge> ledges, bool falling,
-        Rectangle settingsBounds, IntPtr movingWindow)
+        Rectangle settingsBounds, IntPtr movingWindow, SnowAnimalScene animals)
     {
         var weather = settings.Weather;
         int target = Math.Max(25, Math.Min(1300,
@@ -1769,7 +1925,7 @@ sealed partial class SnowWindow : NativeWindow, IDisposable
             canvas.FillEllipse(ice, clump.X, clump.Y, clump.Radius + 1, clump.Radius);
             canvas.FillEllipse(snow, clump.X, clump.Y - .6f, clump.Radius, clump.Radius * .77f);
         }
-        DrawAnimals(dt, falling && !sweeping && settings.Animals, windowBounds);
+        if (falling && !sweeping && settings.Animals) DrawAnimals(animals, windowBounds);
         PublishOverlay();
         if (dragBank == null) return;
         if (!PublishDragStrip(dragBank))
@@ -2201,6 +2357,34 @@ sealed class DragLayer : NativeWindow, IDisposable
 
 static class Native
 {
+    [StructLayout(LayoutKind.Sequential)]
+    struct MonitorInfo
+    {
+        public uint Size;
+        public Rect Bounds, WorkArea;
+        public uint Flags;
+    }
+
+    delegate bool DisplayVisitor(IntPtr monitor, IntPtr dc, ref Rect bounds, IntPtr data);
+    [DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr dc, IntPtr clip, DisplayVisitor visitor, IntPtr data);
+    [DllImport("user32.dll", EntryPoint = "GetMonitorInfoW")] static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+
+    public static List<DisplayArea> ReadDisplays()
+    {
+        var displays = new List<DisplayArea>();
+        bool ok = EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero,
+            (IntPtr monitor, IntPtr dc, ref Rect bounds, IntPtr data) =>
+            {
+                var info = new MonitorInfo { Size = (uint)Marshal.SizeOf(typeof(MonitorInfo)) };
+                if (!GetMonitorInfo(monitor, ref info)) return true;
+                Rectangle area = info.Bounds.ToRectangle();
+                if (area.Width > 0 && area.Height > 0 && !displays.Exists(display => display.Bounds == area))
+                    displays.Add(new DisplayArea(area, info.WorkArea.ToRectangle()));
+                return true;
+            }, IntPtr.Zero);
+        if (!ok) displays.Clear();
+        return displays;
+    }
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam);
     public const uint WindowMinimizeStart = 0x0016;
     public const uint WindowLocationChanged = 0x800b;
@@ -2305,6 +2489,9 @@ static class Native
     [DllImport("gdi32.dll")] public static extern IntPtr CreateDIBSection(IntPtr dc, ref BitmapInfo info,
         uint usage, out IntPtr bits, IntPtr section, uint offset);
 }
+
+
+
 
 
 

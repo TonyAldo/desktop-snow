@@ -26,7 +26,9 @@ Desktop Snow targets Windows 10 and 11 with .NET Framework 4.x. The executable i
 
 Press **Ctrl + Alt + Shift + S** to clear snow. If Windows cannot register the shortcut, use the tray menu.
 
-Wiggle a snowy window by its title bar to dislodge clumps. The clumps can land on lower windows or the taskbar and add to their drifts. Minimizing a snowy window also sends its drift tumbling from the title bar. Fullscreen auto-pause hides the overlay while the foreground app fills a monitor and resumes when you leave fullscreen.
+Wiggle a snowy window by its title bar to dislodge clumps. The clumps can land on lower windows or the taskbar and add to their drifts. Minimizing a snowy window also sends its drift tumbling from the title bar. Fullscreen auto-pause hides snow on the display covered by the foreground app. Snow continues on the other displays.
+
+Desktop Snow adapts when you connect, disconnect, or rearrange displays. Snowbanks travel with their windows across display boundaries. Animals can continue across adjacent displays, including offset and stacked layouts.
 
 Preferences are saved in `%LOCALAPPDATA%\DesktopSnow\weather.txt`. To reset them, exit the app and rename that file before reopening it.
 
