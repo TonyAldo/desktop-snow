@@ -7,12 +7,19 @@ if not exist "%compiler%" (
     exit /b 1
 )
 if not exist "%~dp0dist" mkdir "%~dp0dist" || exit /b 1
-"%compiler%" /nologo /target:winexe /optimize+ /warnaserror+ "/win32manifest:%~dp0DesktopSnow.manifest" "/out:%~dp0dist\DesktopSnow.exe" "%~dp0DesktopSnow.cs" "%~dp0SnowSettings.cs" "%~dp0SnowAnimals.cs"
+call :build DesktopSnow.exe
 if errorlevel 1 exit /b 1
-echo Built "%~dp0dist\DesktopSnow.exe"
-if /i "%~1"=="--smoke-test" (
-    start "" /b /wait "%~dp0dist\DesktopSnow.exe" --smoke-test
-    if errorlevel 1 exit /b 1
-    if not errorlevel 0 exit /b 1
-    echo Windows smoke test passed.
-)
+if /i not "%~1"=="--smoke-test" exit /b 0
+call :build DesktopSnow.SmokeTest.exe /define:SMOKE_TEST "%~dp0SmokeTests.cs"
+if errorlevel 1 exit /b 1
+start "" /b /wait "%~dp0dist\DesktopSnow.SmokeTest.exe" --smoke-test
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+echo Windows smoke test passed.
+exit /b 0
+
+:build
+"%compiler%" /nologo /target:winexe /optimize+ /warnaserror+ "/win32manifest:%~dp0DesktopSnow.manifest" "/out:%~dp0dist\%~1" "%~dp0DesktopSnow.cs" "%~dp0SnowSettings.cs" "%~dp0SnowAnimals.cs" "%~dp0SnowPhysics.cs" "%~dp0DragLayer.cs" "%~dp0Native.cs" %2 %3
+if errorlevel 1 exit /b 1
+echo Built "%~dp0dist\%~1"
+exit /b 0

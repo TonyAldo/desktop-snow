@@ -8,7 +8,7 @@ using System.Drawing;
 
 enum SnowAnimal { Rabbit, Fox, Penguin }
 
-sealed class SnowAnimalScene
+sealed partial class SnowAnimalScene
 {
     internal sealed class PawPrint
     {
@@ -224,51 +224,6 @@ sealed class SnowAnimalScene
         Falling = false;
     }
 
-    internal void TestAt(int kind, float x, float y)
-    {
-        var point = new PointF(x, y);
-        BeginVisit((SnowAnimal)kind, 1, point);
-        route.Clear();
-        AddLeg(ref point, x + 150, y);
-        Active = true;
-    }
-
-    internal static void VerifyRoutes()
-    {
-        var left = new DisplayArea(new Rectangle(-400, -60, 400, 380), new Rectangle(-400, -60, 400, 360));
-        var right = new DisplayArea(new Rectangle(0, 0, 500, 440), new Rectangle(0, 0, 500, 410));
-        var scene = new SnowAnimalScene();
-        var pair = new List<DisplayArea> { right, left };
-        scene.Advance(0, pair);
-        scene.StartVisit(right, SnowAnimal.Fox, 1);
-        if (scene.X >= left.Bounds.Left)
-            throw new InvalidOperationException("The route did not start on the outer display.");
-        bool crossed = false;
-        for (int i = 0; i < 400 && scene.Active; i++)
-        {
-            scene.Advance(.025f, pair);
-            if (scene.X < 1 || scene.X > 18) continue;
-            crossed = scene.Visitor == SnowAnimal.Fox && scene.Gait > 1 && scene.Y >= 295 && scene.Y < 330;
-            if (crossed) break;
-        }
-        if (!crossed) throw new InvalidOperationException("The same animal did not cross staggered displays.");
-
-        var upper = new DisplayArea(new Rectangle(0, -380, 480, 380), new Rectangle(0, -380, 480, 350));
-        var stack = new List<DisplayArea> { right, upper };
-        scene.Advance(0, stack);
-        scene.StartVisit(right, SnowAnimal.Penguin, 1);
-        crossed = false;
-        for (int i = 0; i < 400 && scene.Active; i++)
-        {
-            scene.Advance(.025f, stack);
-            if (scene.Y > right.Bounds.Top + 30 && scene.Falling && scene.Visitor == SnowAnimal.Penguin)
-            {
-                crossed = true;
-                break;
-            }
-        }
-        if (!crossed) throw new InvalidOperationException("The animal did not descend to the lower display.");
-    }
 }
 
 partial class SnowWindow
@@ -395,59 +350,6 @@ partial class SnowWindow
         canvas.Restore(posture);
     }
 
-    internal static void VerifyAdjacentAnimalFrames()
-    {
-        var leftBounds = new Rectangle(-320, -36, 320, 300);
-        var rightBounds = new Rectangle(0, -36, 400, 300);
-        using (var left = new SnowWindow(new DisplayArea(leftBounds, leftBounds), true, handle => null))
-        using (var right = new SnowWindow(new DisplayArea(rightBounds, rightBounds), true, handle => null))
-        {
-            var scene = new SnowAnimalScene();
-            scene.TestAt((int)SnowAnimal.Penguin, 0, left.Display.Ground);
-            var covers = new List<Rectangle>();
-            left.BeginFrame(Rectangle.Empty);
-            right.BeginFrame(Rectangle.Empty);
-            left.DrawAnimals(scene, covers);
-            right.DrawAnimals(scene, covers);
-            left.canvas.Flush(System.Drawing.Drawing2D.FlushIntention.Sync);
-            right.canvas.Flush(System.Drawing.Drawing2D.FlushIntention.Sync);
-            int sampleY = left.Display.Ground - leftBounds.Top - 12;
-            if (left.bitmap.GetPixel(leftBounds.Width - 6, sampleY).A == 0
-                || right.bitmap.GetPixel(5, sampleY).A == 0)
-                throw new InvalidOperationException("A display seam clipped one half of the same animal.");
-            left.PublishOverlay();
-            right.PublishOverlay();
-        }
-    }
-
-    public void VerifyAnimalClip()
-    {
-        var scene = new SnowAnimalScene();
-        int x = size.Width / 2;
-        int ground = Display.Ground - ScreenBounds.Top;
-        scene.TestAt((int)SnowAnimal.Penguin, ScreenBounds.Left + x, Display.Ground);
-        var bounds = new List<Rectangle>();
-        BeginFrame(Rectangle.Empty);
-        DrawAnimals(scene, bounds);
-        canvas.Flush(System.Drawing.Drawing2D.FlushIntention.Sync);
-        if (bitmap.GetPixel(x, ground - 12).A == 0)
-            throw new InvalidOperationException("The test animal was not visible.");
-
-        bounds.Add(new Rectangle(x - 40, ground - 50, 80, 55));
-        BeginFrame(Rectangle.Empty);
-        DrawAnimals(scene, bounds);
-        canvas.Flush(System.Drawing.Drawing2D.FlushIntention.Sync);
-        if (bitmap.GetPixel(x, ground - 12).A != 0)
-            throw new InvalidOperationException("The animal drew over an overlapping window.");
-
-        bounds.Clear();
-        BeginFrame(Rectangle.Empty);
-        DrawAnimals(scene, bounds);
-        canvas.Flush(System.Drawing.Drawing2D.FlushIntention.Sync);
-        if (bitmap.GetPixel(x, ground - 12).A == 0)
-            throw new InvalidOperationException("The animal did not reappear after the window moved.");
-    }
-
     void DisposeAnimals()
     {
         fur.Dispose();
@@ -460,6 +362,3 @@ partial class SnowWindow
         powder.Dispose();
     }
 }
-
-
-
