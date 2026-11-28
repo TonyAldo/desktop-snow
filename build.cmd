@@ -13,5 +13,6 @@ echo Built "%~dp0dist\DesktopSnow.exe"
 if /i "%~1"=="--smoke-test" (
     start "" /b /wait "%~dp0dist\DesktopSnow.exe" --smoke-test
     if errorlevel 1 exit /b 1
+    if not errorlevel 0 exit /b 1
     echo Windows smoke test passed.
 )
